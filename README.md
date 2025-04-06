@@ -38,11 +38,11 @@ The main script that initializes the application, handles the GUI, and implement
 - medication_tracking.json
 - appointments.
 
-##Future Enhancements
+## Future Enhancements
 - Integrate predictive analytics to identify trends and potential drug interactions.
 - Improve data protection measures to meet evolving healthcare standards.
 
-License
+## License
 This project is open-source and available under the MIT License.
 
 For more information or contributions, please contact the development team or visit the project repository.Add description of project here
