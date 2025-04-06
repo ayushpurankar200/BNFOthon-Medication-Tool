@@ -15,6 +15,7 @@ medications = {}  # Dictionary to store patient medications
 medication_tracking = {}  # Dictionary to track medication history
 medication_check_windows = {}  # Dictionary to track medication check windows
 patient_notes = {}  # Dictionary to store patient notes
+appointments = {}  # Dictionary to store appointments: {patient_id: {date: [appointments]}}
 
 # Dictionary to store user credentials and type (username: {'password': password, 'type': user_type})
 users = {}
@@ -72,6 +73,88 @@ def save_medications():
             json.dump(medications, file)
     except Exception as e:
         messagebox.showerror("Error", f"Failed to save medications: {str(e)}")
+
+def load_appointments():
+    """Load appointments from file if it exists."""
+    global appointments
+    try:
+        if os.path.exists('appointments.json'):
+            with open('appointments.json', 'r') as file:
+                appointments = json.load(file)
+                print(f"Loaded appointments: {appointments}")  # Debug log
+        else:
+            print("No appointments.json file found, starting with empty appointments")
+            appointments = {}
+    except Exception as e:
+        print(f"Error loading appointments: {str(e)}")
+        messagebox.showerror("Error", f"Failed to load appointments: {str(e)}")
+        appointments = {}
+
+def save_appointments():
+    """Save appointments to file."""
+    try:
+        with open('appointments.json', 'w') as file:
+            json.dump(appointments, file)
+            print(f"Saved appointments: {appointments}")  # Debug log
+    except Exception as e:
+        print(f"Error saving appointments: {str(e)}")
+        messagebox.showerror("Error", f"Failed to save appointments: {str(e)}")
+
+def add_appointment(patient_id, date, time, description, duration="30"):
+    """Add an appointment for a patient."""
+    global appointments  # Ensure we're modifying the global dictionary
+    
+    if patient_id not in appointments:
+        appointments[patient_id] = {}
+    
+    if date not in appointments[patient_id]:
+        appointments[patient_id][date] = []
+    
+    # Create appointment entry
+    appointment = {
+        'time': time,
+        'description': description,
+        'duration': duration,
+        'id': str(uuid.uuid4())[:8]  # Generate unique ID for the appointment
+    }
+    
+    # Add appointment
+    appointments[patient_id][date].append(appointment)
+    
+    # Sort appointments by time
+    appointments[patient_id][date].sort(key=lambda x: x['time'])
+    
+    # Save appointments immediately after adding
+    save_appointments()
+    print(f"Added appointment for patient {patient_id} on {date}: {appointment}")  # Debug log
+    return True
+
+def get_patient_appointments(patient_id, date=None):
+    """Get appointments for a patient, optionally filtered by date."""
+    if patient_id not in appointments:
+        print(f"No appointments found for patient {patient_id}")  # Debug log
+        return []
+    
+    if date:
+        appointments_for_date = appointments[patient_id].get(date, [])
+        print(f"Found {len(appointments_for_date)} appointments for patient {patient_id} on {date}")  # Debug log
+        return appointments_for_date
+    
+    print(f"All appointments for patient {patient_id}: {appointments[patient_id]}")  # Debug log
+    return appointments[patient_id]
+
+def delete_appointment(patient_id, date, appointment_id):
+    """Delete an appointment."""
+    if patient_id in appointments and date in appointments[patient_id]:
+        appointments[patient_id][date] = [
+            apt for apt in appointments[patient_id][date]
+            if apt['id'] != appointment_id
+        ]
+        if not appointments[patient_id][date]:
+            del appointments[patient_id][date]
+        save_appointments()
+        return True
+    return False
 
 def show_frame(frame):
     """Brings the given frame to the front."""
@@ -355,8 +438,8 @@ def update_med_patient_list():
         patient_list = [username for username, data in users.items() if data.get('type') == 'patient']
         med_patient_select['values'] = patient_list
 
-def save_medication():
-    """Save a new medication for the selected patient."""
+def add_medication():
+    """Add or update a medication reminder."""
     selected_username = med_patient_select.get()
     if not selected_username:
         messagebox.showerror("Error", "Please select a patient")
@@ -373,22 +456,77 @@ def save_medication():
         messagebox.showerror("Error", "Please fill in all required fields")
         return
     
+    # Validate and format time
+    try:
+        # Try to parse the time to ensure it's valid
+        time_obj = datetime.strptime(schedule, "%H:%M")
+        formatted_time = time_obj.strftime("%H:%M")  # Ensure consistent format
+    except ValueError:
+        messagebox.showerror("Error", "Invalid time format. Please use HH:MM format (e.g., 09:00)")
+        return
+    
     # Create medication entry
     medication = {
         'name': name,
         'dosage': dosage,
-        'time': schedule,
+        'time': formatted_time,
         'instructions': instructions,
         'status': status,
-        'start_date': datetime.now().strftime('%Y-%m-%d')
+        'start_date': datetime.now().strftime('%Y-%m-%d'),
+        'streak': 0,
+        'history': []
     }
     
-    # Add to patient's medications
+    # Add or update user's medications
     if selected_username in users:
         if 'medications' not in users[selected_username]:
             users[selected_username]['medications'] = []
-        users[selected_username]['medications'].append(medication)
-        messagebox.showinfo("Success", "Medication added successfully")
+        
+        # Check if medication already exists
+        existing_med_index = None
+        for i, med in enumerate(users[selected_username]['medications']):
+            if med['name'] == name:
+                existing_med_index = i
+                break
+        
+        if existing_med_index is not None:
+            # Update existing medication
+            # Preserve streak and history from existing medication
+            medication['streak'] = users[selected_username]['medications'][existing_med_index].get('streak', 0)
+            medication['history'] = users[selected_username]['medications'][existing_med_index].get('history', [])
+            users[selected_username]['medications'][existing_med_index] = medication
+            message = "Medication updated successfully"
+        else:
+            # Add new medication
+            users[selected_username]['medications'].append(medication)
+            message = "Medication added successfully"
+        
+        # Initialize tracking for new medications
+        if selected_username not in medication_tracking:
+            medication_tracking[selected_username] = {}
+        if name not in medication_tracking[selected_username]:
+            medication_tracking[selected_username][name] = {
+                'streak': 0,
+                'history': []
+            }
+        
+        # Save all data
+        save_users()
+        save_medication_tracking()
+        
+        # Add to patient management system
+        if 'patient_id' in users[selected_username]:
+            patient_id = users[selected_username]['patient_id']
+            patient_manager.add_medication(patient_id, {
+                'medication_name': name,
+                'dosage': dosage,
+                'schedule': formatted_time,
+                'instructions': instructions,
+                'status': status,
+                'start_date': datetime.now().strftime('%Y-%m-%d')
+            })
+        
+        messagebox.showinfo("Success", message)
         clear_med_form()
         load_patient_medications()
     else:
@@ -608,7 +746,7 @@ def setup_physician_view():
     med_button_frame.grid_columnconfigure(3, weight=1)
     
     ttk.Button(med_button_frame, text="Save Medication", 
-               command=save_medication).grid(row=0, column=0, padx=5)
+               command=add_medication).grid(row=0, column=0, padx=5)
     ttk.Button(med_button_frame, text="Modify Selected", 
                command=modify_selected_medication).grid(row=0, column=1, padx=5)
     ttk.Button(med_button_frame, text="Delete Selected", 
@@ -623,6 +761,166 @@ def setup_physician_view():
     
     # Initialize the patient list after all widgets are created
     update_patient_list()
+    
+    # Calendar and Appointments Tab
+    calendar_frame = ttk.Frame(notebook)
+    notebook.add(calendar_frame, text='Appointments')
+    
+    # Configure calendar frame grid
+    calendar_frame.grid_columnconfigure(0, weight=1)
+    calendar_frame.grid_rowconfigure(1, weight=1)
+    
+    # Patient selection for appointments
+    selection_frame = ttk.Frame(calendar_frame)
+    selection_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+    
+    ttk.Label(selection_frame, text="Select Patient:").pack(side="left", padx=5)
+    appointment_patient_var = tk.StringVar()
+    appointment_patient_select = ttk.Combobox(selection_frame, textvariable=appointment_patient_var)
+    appointment_patient_select.pack(side="left", padx=5, fill="x", expand=True)
+    
+    # Split frame for calendar and appointments
+    split_frame = ttk.PanedWindow(calendar_frame, orient='horizontal')
+    split_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+    
+    # Calendar side
+    cal_side = ttk.Frame(split_frame)
+    split_frame.add(cal_side, weight=1)
+    
+    # Create calendar
+    cal = Calendar(cal_side, selectmode='day', date_pattern='y-mm-dd')
+    cal.pack(fill="both", expand=True, padx=5, pady=5)
+    
+    # Appointments side
+    apt_side = ttk.Frame(split_frame)
+    split_frame.add(apt_side, weight=1)
+    
+    # Appointments for selected date
+    apt_label = ttk.Label(apt_side, text="Appointments", font=('Helvetica', 12, 'bold'))
+    apt_label.pack(fill="x", padx=5, pady=5)
+    
+    # Appointments list
+    apt_frame = ttk.Frame(apt_side)
+    apt_frame.pack(fill="both", expand=True, padx=5, pady=5)
+    
+    # Add appointment button
+    def add_new_appointment():
+        if not appointment_patient_var.get():
+            messagebox.showerror("Error", "Please select a patient")
+            return
+        
+        selected_date = cal.get_date()
+        
+        # Create appointment dialog
+        dialog = tk.Toplevel()
+        dialog.title("Add Appointment")
+        dialog.geometry("400x300")
+        
+        # Time entry
+        time_frame = ttk.Frame(dialog)
+        time_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Label(time_frame, text="Time (HH:MM):").pack(side="left")
+        time_entry = ttk.Entry(time_frame)
+        time_entry.pack(side="left", padx=5)
+        
+        # Duration entry
+        duration_frame = ttk.Frame(dialog)
+        duration_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Label(duration_frame, text="Duration (minutes):").pack(side="left")
+        duration_entry = ttk.Entry(duration_frame)
+        duration_entry.insert(0, "30")
+        duration_entry.pack(side="left", padx=5)
+        
+        # Description entry
+        desc_frame = ttk.Frame(dialog)
+        desc_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        ttk.Label(desc_frame, text="Description:").pack()
+        desc_text = scrolledtext.ScrolledText(desc_frame, height=5)
+        desc_text.pack(fill="both", expand=True)
+        
+        def save_appointment():
+            time = time_entry.get()
+            duration = duration_entry.get()
+            description = desc_text.get("1.0", tk.END).strip()
+            
+            if not all([time, description]):
+                messagebox.showerror("Error", "Please fill in all fields")
+                return
+            
+            try:
+                # Validate time format
+                datetime.strptime(time, "%H:%M")
+            except ValueError:
+                messagebox.showerror("Error", "Invalid time format. Please use HH:MM")
+                return
+            
+            # Get patient ID
+            patient_id = users[appointment_patient_var.get()]['patient_id']
+            
+            # Add appointment
+            if add_appointment(patient_id, selected_date, time, description, duration):
+                messagebox.showinfo("Success", "Appointment added successfully")
+                dialog.destroy()
+                update_appointments_display()  # Refresh the display
+        
+        # Save button
+        ttk.Button(dialog, text="Save", command=save_appointment).pack(pady=10)
+    
+    def update_appointments_display(*args):
+        # Clear existing appointments
+        for widget in apt_frame.winfo_children():
+            widget.destroy()
+        
+        if not appointment_patient_var.get():
+            return
+        
+        selected_date = cal.get_date()
+        patient_id = users[appointment_patient_var.get()]['patient_id']
+        
+        # Get appointments for selected date
+        day_appointments = get_patient_appointments(patient_id, selected_date)
+        
+        if day_appointments:
+            for apt in day_appointments:
+                apt_item = ttk.Frame(apt_frame)
+                apt_item.pack(fill="x", padx=5, pady=2)
+                
+                # Time and duration
+                time_text = f"{apt['time']} ({apt['duration']} min)"
+                ttk.Label(apt_item, text=time_text).pack(side="left", padx=5)
+                
+                # Description
+                ttk.Label(apt_item, text=apt['description']).pack(side="left", padx=5)
+                
+                # Delete button
+                def delete_apt(a=apt):
+                    if messagebox.askyesno("Confirm Delete", "Delete this appointment?"):
+                        if delete_appointment(patient_id, selected_date, a['id']):
+                            update_appointments_display()
+                
+                ttk.Button(apt_item, text="Delete", command=delete_apt).pack(side="right", padx=5)
+        else:
+            ttk.Label(apt_frame, text="No appointments for this date").pack(pady=10)
+    
+    # Add appointment button
+    ttk.Button(apt_side, text="Add Appointment", command=add_new_appointment).pack(pady=10)
+    
+    # Bind events
+    cal.bind('<<CalendarSelected>>', update_appointments_display)
+    appointment_patient_select.bind('<<ComboboxSelected>>', update_appointments_display)
+    
+    # Update patient list in appointment selection
+    def update_appointment_patient_list():
+        patient_list = [username for username, data in users.items() if data.get('type') == 'patient']
+        appointment_patient_select['values'] = patient_list
+    
+    update_appointment_patient_list()
+    
+    # Initialize the patient list after all widgets are created
+    update_patient_list()
+    
+    # Add logout button
+    ttk.Button(physician_landing_frame, text="Logout", command=go_to_login).grid(row=2, column=0, columnspan=2, pady=10)
 
 def create_header_frame(parent, title):
     """Create a header frame with title and logout button."""
@@ -656,8 +954,46 @@ def show_appointments():
                          font=("Arial", 12, "bold"))
     date_label.pack(pady=10)
     
-    # Get current user's medications
+    # Get current user's appointments
     current_user = username_entry.get()
+    if current_user in users and 'patient_id' in users[current_user]:
+        patient_id = users[current_user]['patient_id']
+        print(f"Checking appointments for patient {patient_id} on {selected_date}")  # Debug log
+        
+        # Get appointments for the selected date
+        day_appointments = get_patient_appointments(patient_id, selected_date)
+        print(f"Found {len(day_appointments)} appointments for this date")  # Debug log
+        
+        if day_appointments:
+            # Create appointments section
+            apt_label = tk.Label(appointments_frame,
+                               text="Appointments:",
+                               font=("Arial", 10, "bold"))
+            apt_label.pack(pady=5)
+            
+            # Display each appointment
+            for apt in sorted(day_appointments, key=lambda x: x['time']):
+                apt_frame = tk.Frame(appointments_frame)
+                apt_frame.pack(fill="x", padx=10, pady=2)
+                
+                # Time and duration
+                time_text = f"{apt['time']} ({apt['duration']} min)"
+                tk.Label(apt_frame,
+                        text=time_text,
+                        font=("Arial", 10)).pack(side="left")
+                
+                # Description
+                tk.Label(apt_frame,
+                        text=f"- {apt['description']}",
+                        font=("Arial", 10),
+                        wraplength=300).pack(side="left", padx=10)
+        else:
+            # No appointments for this date
+            tk.Label(appointments_frame,
+                    text="No appointments scheduled for this date.",
+                    font=("Arial", 10)).pack(pady=5)
+    
+    # Get current user's medications
     if current_user in users and 'medications' in users[current_user]:
         medications = users[current_user]['medications']
         
@@ -672,7 +1008,7 @@ def show_appointments():
             med_label.pack(pady=5)
             
             # Display each medication
-            for med in date_medications:
+            for med in sorted(date_medications, key=lambda x: x['time']):
                 med_frame = tk.Frame(appointments_frame)
                 med_frame.pack(fill="x", padx=10, pady=2)
                 
@@ -685,16 +1021,36 @@ def show_appointments():
                 tk.Label(med_frame,
                         text=f"at {med['time']}",
                         font=("Arial", 10)).pack(side="left", padx=10)
+                
+                # Status
+                current_time = datetime.now()
+                if current_time.strftime("%Y-%m-%d") == selected_date:
+                    med_history = medication_tracking.get(current_user, {}).get(med['name'], {}).get('history', [])
+                    today_entry = next((entry for entry in med_history if entry['date'] == selected_date), None)
+                    
+                    if today_entry:
+                        if today_entry['status'] == 'on_time':
+                            status_text = "✓ Taken on time"
+                            status_color = "green"
+                        elif today_entry['status'] == 'late':
+                            status_text = "⚠ Taken late"
+                            status_color = "orange"
+                        elif today_entry['status'] == 'missed':
+                            status_text = "✗ Missed"
+                            status_color = "red"
+                        else:
+                            status_text = "Pending"
+                            status_color = "blue"
+                        
+                        tk.Label(med_frame,
+                                text=status_text,
+                                font=("Arial", 10),
+                                fg=status_color).pack(side="right", padx=10)
         else:
             # No medications for this date
             tk.Label(appointments_frame,
                     text="No medications scheduled for this date.",
-                    font=("Arial", 10)).pack(pady=10)
-    else:
-        # No medications prescribed
-        tk.Label(appointments_frame,
-                text="No medications prescribed.",
-                font=("Arial", 10)).pack(pady=10)
+                    font=("Arial", 10)).pack(pady=5)
 
 def update_patient_medications():
     """Update the medication display for the current patient."""
@@ -712,66 +1068,105 @@ def update_patient_medications():
     # Add title
     tk.Label(med_list_frame,
             text="Current Medications",
-            font=("Arial", 12, "bold")).grid(row=0, column=0, pady=10)
+            font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=3, pady=10)
     
     # Check if user has medications
     if current_user in users and 'medications' in users[current_user]:
         medications = users[current_user]['medications']
         
+        # Add headers
+        headers = ["Medication", "Time", "Status", "Take"]
+        for i, header in enumerate(headers):
+            tk.Label(med_list_frame,
+                    text=header,
+                    font=("Arial", 10, "bold")).grid(row=1, column=i, padx=5, pady=5)
+        
+        # Get current time
+        current_time = datetime.now()
+        current_date = current_time.strftime("%Y-%m-%d")
+        
         # Add each medication
-        for i, med in enumerate(medications, 1):
-            med_frame = tk.Frame(med_list_frame)
-            med_frame.grid(row=i, column=0, sticky="ew", pady=2)
-            med_frame.grid_columnconfigure(1, weight=1)
-            
+        for i, med in enumerate(medications, 2):
             # Medication name and dosage
-            tk.Label(med_frame,
+            tk.Label(med_list_frame,
                     text=f"{med['name']} - {med['dosage']}",
-                    font=("Arial", 10)).grid(row=0, column=0, sticky="w")
+                    font=("Arial", 10)).grid(row=i, column=0, sticky="w", padx=5, pady=2)
             
-            # Time
-            tk.Label(med_frame,
-                    text=f"at {med['time']}",
-                    font=("Arial", 10)).grid(row=0, column=1, sticky="w", padx=10)
+            # Scheduled time
+            tk.Label(med_list_frame,
+                    text=med['time'],
+                    font=("Arial", 10)).grid(row=i, column=1, padx=5, pady=2)
             
-            # Current streak
-            streak = med.get('streak', 0)
-            streak_text = "🔥" * streak if streak > 0 else "No streak yet"
-            tk.Label(med_frame,
-                    text=streak_text,
-                    font=("Arial", 10)).grid(row=0, column=2, sticky="e")
+            # Calculate time difference
+            med_time = datetime.strptime(med['time'], "%H:%M").time()
+            current_time_only = current_time.time()
+            time_diff = (current_time_only.hour * 60 + current_time_only.minute) - \
+                       (med_time.hour * 60 + med_time.minute)
             
-            # Status and take button
-            status_frame = tk.Frame(med_frame)
-            status_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=5)
+            # Check medication history for today
+            med_history = medication_tracking.get(current_user, {}).get(med['name'], {}).get('history', [])
+            today_entry = next((entry for entry in med_history if entry['date'] == current_date), None)
             
-            # Check if it's time to take the medication
-            current_time = datetime.now().strftime("%H:%M")
-            med_time = datetime.strptime(med['time'], "%H:%M").strftime("%H:%M")
-            time_diff = (datetime.strptime(current_time, "%H:%M") - 
-                        datetime.strptime(med_time, "%H:%M")).total_seconds() / 3600
-            
-            if abs(time_diff) <= 1:  # Within 1 hour window
-                status = "Time to take medication"
-                status_color = "blue"
-                
-                # Add take button
-                tk.Button(status_frame,
-                         text="Take Medication",
-                         command=lambda m=med: take_medication(m)).pack(side="right")
+            # Determine status and whether to show checkbox
+            if today_entry:
+                status = today_entry['status']
+                if status == 'on_time':
+                    status_text = "✓ Taken on time"
+                    status_color = "green"
+                    show_checkbox = False
+                elif status == 'late':
+                    status_text = "⚠ Taken late"
+                    status_color = "orange"
+                    show_checkbox = False
+                else:
+                    status_text = "✗ Missed"
+                    status_color = "red"
+                    show_checkbox = True
             else:
-                status = "Next dose pending"
-                status_color = "black"
+                # No entry for today
+                if abs(time_diff) <= 10:  # Within 10-minute window
+                    status_text = "Time to take!"
+                    status_color = "blue"
+                    show_checkbox = True
+                elif time_diff > 10:  # More than 10 minutes late
+                    status_text = "Late"
+                    status_color = "orange"
+                    show_checkbox = True
+                else:  # Not time yet
+                    status_text = "Pending"
+                    status_color = "black"
+                    show_checkbox = False
             
-            tk.Label(status_frame,
-                    text=status,
-                    fg=status_color,
-                    font=("Arial", 10)).pack(side="left")
+            # Status label
+            status_label = tk.Label(med_list_frame,
+                                  text=status_text,
+                                  fg=status_color,
+                                  font=("Arial", 10))
+            status_label.grid(row=i, column=2, padx=5, pady=2)
+            
+            # Checkbox or take button
+            if show_checkbox:
+                take_button = ttk.Button(
+                    med_list_frame,
+                    text="Take Now",
+                    command=lambda m=med: take_medication(m)
+                )
+                take_button.grid(row=i, column=3, padx=5, pady=2)
+            
+            # Add instructions if available
+            if 'instructions' in med and med['instructions']:
+                tk.Label(med_list_frame,
+                        text=f"Instructions: {med['instructions']}",
+                        font=("Arial", 9, "italic"),
+                        wraplength=400).grid(row=i+1, column=0, columnspan=4, sticky="w", pady=(0, 5))
     else:
         # No medications
         tk.Label(med_list_frame,
                 text="No medications prescribed.",
                 font=("Arial", 10)).grid(row=1, column=0, pady=10)
+    
+    # Schedule next update in 1 minute
+    medication_display.after(60000, update_patient_medications)
 
 def take_medication(medication):
     """Mark a medication as taken and update streak."""
@@ -787,7 +1182,7 @@ def take_medication(medication):
                 (med_time.hour * 60 + med_time.minute)
     
     # Update streak based on timing
-    if abs(time_diff) <= 30:  # Within 30 minutes is considered on time
+    if abs(time_diff) <= 10:  # Within 10 minutes is considered on time
         status = "on_time"
         streak_increment = 1
     else:
@@ -796,31 +1191,46 @@ def take_medication(medication):
     
     # Update streak in user data
     if current_user in users:
-        if 'medications' in users[current_user]:
-            for med in users[current_user]['medications']:
-                if med['name'] == medication['name']:
-                    if 'streak' not in med:
-                        med['streak'] = 0
-                    med['streak'] = max(0, med['streak'] + streak_increment)
-                    
-                    # Add history entry
-                    if 'history' not in med:
-                        med['history'] = []
-                    med['history'].append({
-                        'date': current_time.strftime("%Y-%m-%d"),
-                        'time': current_time.strftime("%H:%M"),
-                        'status': status
-                    })
-                    break
+        if 'medications' not in users[current_user]:
+            users[current_user]['medications'] = []
         
-        # Save updated data
+        # Find and update the medication
+        for med in users[current_user]['medications']:
+            if med['name'] == medication['name']:
+                if 'streak' not in med:
+                    med['streak'] = 0
+                med['streak'] = max(0, med['streak'] + streak_increment)
+                break
+        
+        # Update tracking data
+        if current_user not in medication_tracking:
+            medication_tracking[current_user] = {}
+        if medication['name'] not in medication_tracking[current_user]:
+            medication_tracking[current_user][medication['name']] = {
+                'streak': 0,
+                'history': []
+            }
+        
+        tracking_data = medication_tracking[current_user][medication['name']]
+        tracking_data['streak'] = max(0, tracking_data['streak'] + streak_increment)
+        
+        # Add history entry
+        history_entry = {
+            'date': current_time.strftime("%Y-%m-%d"),
+            'time': current_time.strftime("%H:%M"),
+            'status': status
+        }
+        tracking_data['history'].append(history_entry)
+        
+        # Save data
         save_users()
+        save_medication_tracking()
         
         # Show notification
         try:
             notification.notify(
                 title="Medication Taken",
-                message=f"Medication {medication['name']} marked as {status}",
+                message=f"{medication['name']} marked as {status}",
                 app_icon=None,
                 timeout=5
             )
@@ -835,75 +1245,92 @@ def take_medication(medication):
 def check_medication_reminders():
     """Check for medication reminders and send notifications."""
     while True:
-        current_time = datetime.now()
-        current_user = username_entry.get()
-        
-        if current_user in medications:
-            for med in medications[current_user]:
-                med_time = datetime.strptime(med['time'], "%H:%M").time()
-                current_time_only = current_time.time()
-                
-                # Check if it's time for medication (within 1 minute of scheduled time)
-                if (med_time.hour == current_time_only.hour and 
-                    abs(med_time.minute - current_time_only.minute) <= 1):
-                    
-                    # Create 10-minute window for taking medication
-                    window_start = current_time
-                    window_end = current_time + timedelta(minutes=10)
-                    
-                    if current_user not in medication_check_windows:
-                        medication_check_windows[current_user] = {}
-                    
-                    # Only create new window if one doesn't exist for this medication
-                    if med['name'] not in medication_check_windows[current_user]:
-                        medication_check_windows[current_user][med['name']] = {
-                            'window_start': window_start.strftime("%Y-%m-%d %H:%M:%S"),
-                            'window_end': window_end.strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                        
-                        # Create tracking entry if it doesn't exist
-                        if current_user not in medication_tracking:
-                            medication_tracking[current_user] = {}
-                        if med['name'] not in medication_tracking[current_user]:
-                            medication_tracking[current_user][med['name']] = {
-                                'streak': 0,
-                                'history': []
-                            }
-                        
-                        # Add new tracking entry
-                        medication_tracking[current_user][med['name']]['history'].append({
-                            'date': current_time.strftime("%Y-%m-%d"),
-                            'time': med['time'],
-                            'status': 'pending'
-                        })
-                        save_medication_tracking()
-                        
-                        # Send notification
+        try:
+            current_time = datetime.now()
+            current_user = username_entry.get()
+            
+            if current_user in users and 'medications' in users[current_user]:
+                for med in users[current_user]['medications']:
+                    try:
+                        # Validate time format
+                        if 'time' not in med or not isinstance(med['time'], str):
+                            continue
+                            
                         try:
-                            notification.notify(
-                                title="Medication Reminder",
-                                message=f"Time to take {med['name']} - {med['dosage']}",
-                                app_icon=None,
-                                timeout=10
-                            )
-                        except Exception as e:
-                            print(f"Notification error: {e}")
-                
-                # Check for missed medications (10 minutes after window end)
-                elif (med_time.hour == current_time_only.hour and 
-                      current_time_only.minute == (med_time.minute + 20) % 60):
-                    
-                    # If there's a pending entry that hasn't been marked, mark it as missed
-                    if (current_user in medication_tracking and 
-                        med['name'] in medication_tracking[current_user]):
+                            med_time = datetime.strptime(med['time'], "%H:%M").time()
+                        except ValueError:
+                            print(f"Invalid time format for medication: {med.get('name', 'Unknown')}")
+                            continue
+                            
+                        current_time_only = current_time.time()
                         
-                        for entry in reversed(medication_tracking[current_user][med['name']]['history']):
-                            if entry['status'] == 'pending' and entry['date'] == current_time.strftime("%Y-%m-%d"):
-                                entry['status'] = 'missed'
-                                medication_tracking[current_user][med['name']]['streak'] = 0
+                        # Check if it's time for medication (within 1 minute of scheduled time)
+                        if (med_time.hour == current_time_only.hour and 
+                            abs(med_time.minute - current_time_only.minute) <= 1):
+                            
+                            # Create 10-minute window for taking medication
+                            window_start = current_time
+                            window_end = current_time + timedelta(minutes=10)
+                            
+                            if current_user not in medication_check_windows:
+                                medication_check_windows[current_user] = {}
+                            
+                            # Only create new window if one doesn't exist for this medication
+                            if med['name'] not in medication_check_windows[current_user]:
+                                medication_check_windows[current_user][med['name']] = {
+                                    'window_start': window_start.strftime("%Y-%m-%d %H:%M:%S"),
+                                    'window_end': window_end.strftime("%Y-%m-%d %H:%M:%S")
+                                }
+                                
+                                # Create tracking entry if it doesn't exist
+                                if current_user not in medication_tracking:
+                                    medication_tracking[current_user] = {}
+                                if med['name'] not in medication_tracking[current_user]:
+                                    medication_tracking[current_user][med['name']] = {
+                                        'streak': 0,
+                                        'history': []
+                                    }
+                                
+                                # Add new tracking entry
+                                medication_tracking[current_user][med['name']]['history'].append({
+                                    'date': current_time.strftime("%Y-%m-%d"),
+                                    'time': med['time'],
+                                    'status': 'pending'
+                                })
                                 save_medication_tracking()
-                                update_patient_medications()
-                                break
+                                
+                                # Send notification
+                                try:
+                                    notification.notify(
+                                        title="Medication Reminder",
+                                        message=f"Time to take {med['name']} - {med['dosage']}",
+                                        app_icon=None,
+                                        timeout=10
+                                    )
+                                except Exception as e:
+                                    print(f"Notification error: {e}")
+                        
+                        # Check for missed medications (10 minutes after window end)
+                        elif (med_time.hour == current_time_only.hour and 
+                              current_time_only.minute == (med_time.minute + 20) % 60):
+                            
+                            # If there's a pending entry that hasn't been marked, mark it as missed
+                            if (current_user in medication_tracking and 
+                                med['name'] in medication_tracking[current_user]):
+                                
+                                for entry in reversed(medication_tracking[current_user][med['name']]['history']):
+                                    if entry['status'] == 'pending' and entry['date'] == current_time.strftime("%Y-%m-%d"):
+                                        entry['status'] = 'missed'
+                                        medication_tracking[current_user][med['name']]['streak'] = 0
+                                        save_medication_tracking()
+                                        update_patient_medications()
+                                        break
+                    except Exception as e:
+                        print(f"Error processing medication: {med.get('name', 'Unknown')}, Error: {str(e)}")
+                        continue
+        
+        except Exception as e:
+            print(f"Error in medication reminder checker: {str(e)}")
         
         time.sleep(30)  # Check every 30 seconds
 
@@ -1008,58 +1435,6 @@ def search_patient():
     else:
         messagebox.showerror("Error", "Patient not found")
 
-def add_medication():
-    """Add a new medication reminder."""
-    # Get patient username
-    patient_username = simpledialog.askstring("Add Medication", "Enter patient's username:")
-    if not patient_username or patient_username not in users:
-        messagebox.showerror("Error", "Invalid patient username")
-        return
-    
-    # Get medication details
-    name = simpledialog.askstring("Add Medication", "Enter medication name:")
-    if not name:
-        return
-        
-    dosage = simpledialog.askstring("Add Medication", "Enter dosage:")
-    if not dosage:
-        return
-        
-    time_str = simpledialog.askstring("Add Medication", "Enter time (HH:MM):")
-    if not time_str:
-        return
-    
-    # Create medication entry
-    medication = {
-        'name': name,
-        'dosage': dosage,
-        'time': time_str,
-        'prescribed_by': username_entry.get()  # Store who prescribed the medication
-    }
-    
-    # Add to medications dictionary
-    if patient_username not in medications:
-        medications[patient_username] = []
-    
-    medications[patient_username].append(medication)
-    save_medications()
-    
-    # Initialize tracking for the new medication
-    if patient_username not in medication_tracking:
-        medication_tracking[patient_username] = {}
-    if name not in medication_tracking[patient_username]:
-        medication_tracking[patient_username][name] = {
-            'streak': 0,
-            'history': []
-        }
-    save_medication_tracking()
-    
-    # Update display
-    if users[username_entry.get()]['type'] == 'physician':
-        update_physician_patient_view()
-    else:
-        update_patient_medications()
-
 def display_patient_medications():
     """Display medications for the current patient."""
     current_user = username_entry.get()
@@ -1127,15 +1502,54 @@ def setup_patient_view():
     calendar_frame.grid_rowconfigure(1, weight=1)
     calendar_frame.grid_columnconfigure(0, weight=1)
     
-    # Create calendar
-    cal = Calendar(calendar_frame, selectmode='day')
+    # Create calendar with larger size
+    cal = Calendar(calendar_frame, selectmode='day', date_pattern='y-mm-dd', 
+                  font=("Arial", 10),  # Larger font
+                  selectbackground='#3498db',  # Blue selection color
+                  selectforeground='white',    # White text for selection
+                  normalbackground='white',    # White background
+                  normalforeground='black',    # Black text
+                  weekendbackground='#f0f0f0', # Light gray for weekends
+                  weekendforeground='black',   # Black text for weekends
+                  othermonthbackground='#f0f0f0', # Light gray for other months
+                  othermonthforeground='#808080', # Gray text for other months
+                  othermonthwebackground='#f0f0f0', # Light gray for other month weekends
+                  othermonthweforeground='#808080', # Gray text for other month weekends
+                  width=30,  # Wider calendar
+                  height=10) # Taller calendar
     cal.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
     
-    # Appointments display
+    # Bind calendar selection to show appointments
+    cal.bind('<<CalendarSelected>>', lambda e: show_appointments())
+    
+    # Appointments display with scrollbar
     appointments_frame = ttk.Frame(calendar_frame)
     appointments_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
     appointments_frame.grid_rowconfigure(0, weight=1)
     appointments_frame.grid_columnconfigure(0, weight=1)
+    
+    # Create a canvas with scrollbar
+    canvas = tk.Canvas(appointments_frame)
+    scrollbar = ttk.Scrollbar(appointments_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = ttk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Pack the canvas and scrollbar
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    
+    # Update the appointments_frame reference to point to the scrollable frame
+    appointments_frame = scrollable_frame
+    
+    # Show initial appointments
+    show_appointments()
     
     # Medications Section
     medications_frame = ttk.LabelFrame(main_frame, text="Medications")
@@ -1143,16 +1557,30 @@ def setup_patient_view():
     medications_frame.grid_rowconfigure(0, weight=1)
     medications_frame.grid_columnconfigure(0, weight=1)
     
-    # Create medication display
-    medication_display = ttk.Frame(medications_frame)
-    medication_display.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-    medication_display.grid_rowconfigure(0, weight=1)
-    medication_display.grid_columnconfigure(0, weight=1)
+    # Create medication display with scrollbar
+    medication_canvas = tk.Canvas(medications_frame)
+    medication_scrollbar = ttk.Scrollbar(medications_frame, orient="vertical", command=medication_canvas.yview)
+    medication_scrollable_frame = ttk.Frame(medication_canvas)
+    
+    medication_scrollable_frame.bind(
+        "<Configure>",
+        lambda e: medication_canvas.configure(scrollregion=medication_canvas.bbox("all"))
+    )
+    
+    medication_canvas.create_window((0, 0), window=medication_scrollable_frame, anchor="nw")
+    medication_canvas.configure(yscrollcommand=medication_scrollbar.set)
+    
+    # Pack the canvas and scrollbar
+    medication_canvas.grid(row=0, column=0, sticky="nsew")
+    medication_scrollbar.grid(row=0, column=1, sticky="ns")
+    
+    # Update the medication_display reference to point to the scrollable frame
+    medication_display = medication_scrollable_frame
     
     # Add refresh button for medications
     refresh_button = ttk.Button(medications_frame, text="Refresh Medications", 
                               command=display_patient_medications)
-    refresh_button.grid(row=1, column=0, sticky="e", padx=5, pady=5)
+    refresh_button.grid(row=1, column=0, columnspan=2, sticky="e", padx=5, pady=5)
     
     # Notes Section
     notes_frame = ttk.LabelFrame(main_frame, text="Notes")
@@ -1179,6 +1607,9 @@ def setup_patient_view():
     # Update initial display
     display_patient_medications()
     update_patient_notes()
+    
+    # Add logout button
+    ttk.Button(patient_landing_frame, text="Logout", command=go_to_login).grid(row=2, column=0, columnspan=2, pady=10)
 
 def modify_selected_medication():
     """Load selected medication into form for editing"""
@@ -1204,16 +1635,18 @@ def modify_selected_medication():
 
 # Create the main window
 root = tk.Tk()
-root.title("Login Application")
+root.title("Medication Tracker")
 
-# Load existing user data
+# Load all data at startup
 load_users()
+load_appointments()
+patient_manager = PatientManagement()
 
 # Configure grid so frames expand to fill the window
 root.rowconfigure(0, weight=1)
 root.columnconfigure(0, weight=1)
 
-# Create three frames: one for login, one for sign-up, and one for landing page
+# Create frames
 login_frame = tk.Frame(root)
 signup_frame = tk.Frame(root)
 patient_landing_frame = tk.Frame(root)
@@ -1231,7 +1664,7 @@ for frame in (login_frame, signup_frame, patient_landing_frame, physician_landin
 login_container = tk.Frame(login_frame)
 login_container.place(relx=0.5, rely=0.5, anchor="center")
 
-tk.Label(login_container, text="Login", font=('Helvetica', 24, 'bold')).grid(row=0, column=0, columnspan=2, pady=(0,20))
+tk.Label(login_container, text="Welcome! Please Login or Sign Up", font=('Helvetica', 24, 'bold')).grid(row=0, column=0, columnspan=2, pady=(0,20))
 
 tk.Label(login_container, text="Username:", font=('Helvetica', 12)).grid(row=1, column=0, padx=10, pady=10, sticky="e")
 username_entry = tk.Entry(login_container, font=('Helvetica', 12), width=20)
@@ -1304,11 +1737,40 @@ tk.Button(button_frame, text="View Appointments", width=15).pack(side="left", pa
 tk.Button(button_frame, text="View Prescriptions", width=15).pack(side="left", padx=5)
 tk.Button(button_frame, text="View Test Results", width=15).pack(side="left", padx=5)
 
+# Logout Button
+tk.Button(patient_landing_frame, text="Logout", 
+          command=lambda: [show_frame(login_frame), username_entry.delete(0, tk.END), password_entry.delete(0, tk.END)]
+          ).grid(row=3, column=0, columnspan=2, pady=20)
+
+# -------------------
+# Physician Landing Page Frame Setup
+# -------------------
+tk.Label(physician_landing_frame, text="Physician Dashboard", font=('Helvetica', 16)).grid(row=0, column=0, columnspan=2, pady=20)
+
+tk.Label(physician_landing_frame, text="You have successfully logged in as a physician!", font=('Helvetica', 12)).grid(row=1, column=0, columnspan=2, pady=10)
+
+tk.Button(physician_landing_frame, text="Logout", 
+          command=lambda: [show_frame(login_frame), username_entry.delete(0, tk.END), password_entry.delete(0, tk.END)]
+          ).grid(row=2, column=0, columnspan=2, pady=20)
+
+# Function to handle application closing
+def on_closing():
+    """Save all data and close the application."""
+    save_users()
+    save_appointments()
+    save_medication_tracking()
+    root.destroy()
+
+# Bind the closing event
+root.protocol("WM_DELETE_WINDOW", on_closing)
+
 # Show the login frame first
 show_frame(login_frame)
 
+# Start the medication reminder checker in a separate thread
+import threading
+reminder_thread = threading.Thread(target=check_medication_reminders, daemon=True)
+reminder_thread.start()
+
 # Start the GUI event loop
 root.mainloop()
-
-# Save user data when the application closes
-save_users()
